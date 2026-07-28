@@ -1,11 +1,11 @@
-# Implementation Status
+## Repository Status
 
-This repository currently contains the research paper, methodology, diagrams, and experimental results.
+This repository currently includes:
 
-The simulation code is being organized and documented before it is published.
+- Research Paper
+- System Architecture
+- Experimental Results
+- Performance Analysis
+- Project Documentation
 
-Future updates will include:
-- Python implementation
-- DRL model
-- ACO algorithm
-- Simulation scripts
+The implementation code will be added in a future update.
