@@ -1,0 +1,4 @@
+Input → [Transformer] → [GAT] → [Feature Fusion] → [PPO Policy Network] → Output
+     ↓              ↓           ↓                 ↓
+ Trajectory      DAG        Combined         Offloading
+  Data         Structure   Representation    Decisions
