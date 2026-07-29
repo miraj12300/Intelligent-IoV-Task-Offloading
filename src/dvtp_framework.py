@@ -4,35 +4,8 @@ import torch.optim as optim
 import numpy as np
 import networkx as nx
 from torch_geometric.nn import GATConv
-import gym
 from collections import deque
 import random
-
-class TransformerTrajectoryPredictor(nn.Module):
-    def __init__(self, d_model=512, nhead=8, num_layers=6, dropout=0.1):
-        super().__init__()
-        self.d_model = d_model
-        self.positional_encoding = PositionalEncoding(d_model, dropout)
-        
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, dropout=dropout, activation='relu'
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model, nhead=nhead, dropout=dropout, activation='relu'
-        )
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-        
-        self.output_projection = nn.Linear(d_model, 2)  # x, y coordinates
-
-    def forward(self, src, tgt):
-        src = self.positional_encoding(src)
-        tgt = self.positional_encoding(tgt)
-        
-        memory = self.encoder(src)
-        output = self.decoder(tgt, memory)
-        return self.output_projection(output)
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
@@ -51,6 +24,30 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
+
+class TransformerTrajectoryPredictor(nn.Module):
+    def __init__(self, input_dim=10, d_model=512, nhead=8, num_layers=6, dropout=0.1, output_dim=2):
+        super().__init__()
+        self.d_model = d_model
+        self.input_projection = nn.Linear(input_dim, d_model)
+        self.positional_encoding = PositionalEncoding(d_model, dropout)
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dropout=dropout, activation='relu'
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        self.output_projection = nn.Linear(d_model, output_dim)
+
+    def forward(self, src):
+        # src shape: (sequence_length, batch_size, input_dim)
+        src = self.input_projection(src) * np.sqrt(self.d_model)
+        src = self.positional_encoding(src)
+        
+        encoded = self.encoder(src)
+        output = self.output_projection(encoded)
+        
+        return output
 
 class VariationalGATEncoder(nn.Module):
     def __init__(self, in_features, hidden_dim=256, num_heads=8, num_layers=4):
@@ -139,10 +136,11 @@ class DVTPPolicyNetwork(nn.Module):
         return node_logits, location_logits, value
 
 class DAGEnvironment:
-    def __init__(self, num_vehicles=3, num_servers=2, max_nodes=20):
+    def __init__(self, num_vehicles=3, num_servers=2, max_nodes=20, trajectory_predictor=None):
         self.num_vehicles = num_vehicles
         self.num_servers = num_servers
         self.max_nodes = max_nodes
+        self.trajectory_predictor = trajectory_predictor
         self.reset()
     
     def generate_dag(self):
@@ -178,6 +176,12 @@ class DAGEnvironment:
         self.current_step = 0
         self.completion_times = {i: 0 for i in range(self.num_vehicles)}
         
+        # Initialize vehicle positions (simulated from trajectory data)
+        self.vehicle_positions = {
+            i: (random.uniform(0, 3000), random.uniform(0, 3000)) 
+            for i in range(self.num_vehicles)
+        }
+        
         return self._get_state()
     
     def _get_available_nodes(self):
@@ -196,8 +200,7 @@ class DAGEnvironment:
         return available
     
     def _get_state(self):
-        """Get current state representation"""
-        # Simplified state representation for demo
+        """Get current state representation with trajectory information"""
         state = []
         
         # Node features
@@ -213,8 +216,13 @@ class DAGEnvironment:
                 ]
                 state.extend(node_features)
         
+        # Vehicle position features (from trajectory data)
+        for veh_id in range(self.num_vehicles):
+            x, y = self.vehicle_positions[veh_id]
+            state.extend([x / 3000, y / 3000])  # Normalize
+        
         # Pad state to fixed size
-        max_state_size = self.num_vehicles * self.max_nodes * 6
+        max_state_size = self.num_vehicles * self.max_nodes * 6 + self.num_vehicles * 2
         if len(state) < max_state_size:
             state.extend([0] * (max_state_size - len(state)))
         else:
@@ -236,17 +244,39 @@ class DAGEnvironment:
         # Schedule the node
         self.scheduled_nodes.add((veh_id, node))
         
-        # Simulate computation time (simplified)
+        # Calculate transmission time based on distance
+        if location < self.num_vehicles:  # Vehicle execution
+            # Calculate distance between vehicles
+            target_vehicle_pos = self.vehicle_positions[location]
+            current_vehicle_pos = self.vehicle_positions[veh_id]
+            distance = np.sqrt(
+                (target_vehicle_pos[0] - current_vehicle_pos[0])**2 +
+                (target_vehicle_pos[1] - current_vehicle_pos[1])**2
+            )
+            transmission_time = distance / 1000  # Simplified transmission model
+        else:  # Server execution
+            transmission_time = 0.1  # Fixed transmission time to server
+        
+        # Simulate computation time
         computation_time = self.dags[veh_id].nodes[node]['computation'] / 10**7
         if location < self.num_vehicles:  # Vehicle execution
             computation_time *= 2  # Slower than servers
         else:  # Server execution
             computation_time *= 0.5  # Faster execution
         
-        self.completion_times[veh_id] += computation_time
+        total_time = computation_time + transmission_time
+        self.completion_times[veh_id] += total_time
         
         # Reward based on reduction in completion time
-        reward = -computation_time / 100  # Negative reward for time taken
+        reward = -total_time / 100
+        
+        # Update vehicle positions (simulate movement)
+        for veh_id in range(self.num_vehicles):
+            dx, dy = random.uniform(-50, 50), random.uniform(-50, 50)
+            x, y = self.vehicle_positions[veh_id]
+            new_x = max(0, min(3000, x + dx))
+            new_y = max(0, min(3000, y + dy))
+            self.vehicle_positions[veh_id] = (new_x, new_y)
         
         # Update available nodes
         self.available_nodes = self._get_available_nodes()
@@ -317,68 +347,3 @@ class PPO:
         self.optimizer.step()
         
         return loss.item()
-
-def train_dvtp():
-    # Environment parameters
-    num_vehicles = 3
-    num_servers = 2
-    max_nodes = 20
-    state_dim = num_vehicles * max_nodes * 6  # Simplified state dimension
-    
-    # Initialize environment and agent
-    env = DAGEnvironment(num_vehicles, num_servers, max_nodes)
-    agent = PPO(state_dim, max_nodes, num_vehicles + num_servers)
-    
-    # Training parameters
-    num_episodes = 1000
-    max_steps = 100
-    batch_size = 64
-    
-    for episode in range(num_episodes):
-        state = env.reset()
-        episode_reward = 0
-        states, actions, log_probs, rewards, values = [], [], [], [], []
-        
-        for step in range(max_steps):
-            # Get action from policy
-            action, log_prob, value = agent.get_action(state)
-            
-            # Execute action
-            next_state, reward, done = env.step(action[0], action[1])
-            
-            # Store transition
-            states.append(state)
-            actions.append(action)
-            log_probs.append(log_prob)
-            rewards.append(reward)
-            values.append(value)
-            
-            state = next_state
-            episode_reward += reward
-            
-            if done:
-                break
-        
-        # Calculate returns and advantages
-        returns = []
-        R = 0
-        for r in reversed(rewards):
-            R = r + agent.gamma * R
-            returns.insert(0, R)
-        
-        returns = torch.FloatTensor(returns)
-        values = torch.FloatTensor(values)
-        advantages = returns - values
-        
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        # Update policy
-        if len(states) >= batch_size:
-            agent.update(states, actions, log_probs, returns, advantages)
-        
-        if episode % 100 == 0:
-            print(f"Episode {episode}, Reward: {episode_reward:.2f}")
-
-if __name__ == "__main__":
-    train_dvtp()
