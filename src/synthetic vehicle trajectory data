@@ -1,0 +1,97 @@
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
+
+def generate_vehicle_trajectories(num_vehicles=10, hours=24, area_size=3000):
+    """Generate synthetic vehicle trajectory data"""
+    
+    trajectories = []
+    base_time = datetime(2024, 1, 1, 0, 0, 0)
+    
+    for veh_id in range(num_vehicles):
+        # Start from random position
+        x = np.random.uniform(0, area_size)
+        y = np.random.uniform(0, area_size)
+        
+        for hour in range(hours):
+            for minute in range(0, 60, 5):  # Every 5 minutes
+                current_time = base_time + timedelta(hours=hour, minutes=minute)
+                
+                # Simulate vehicle movement (random walk)
+                x += np.random.normal(0, 50)  # 50m std deviation
+                y += np.random.normal(0, 50)
+                
+                # Keep within bounds
+                x = np.clip(x, 0, area_size)
+                y = np.clip(y, 0, area_size)
+                
+                # Add some traffic patterns
+                speed = np.random.uniform(5, 25)  # km/h
+                direction = np.random.uniform(0, 2 * np.pi)
+                
+                trajectories.append({
+                    'vehicle_id': veh_id,
+                    'timestamp': current_time,
+                    'x_coordinate': x,
+                    'y_coordinate': y,
+                    'speed': speed,
+                    'direction': direction
+                })
+    
+    return pd.DataFrame(trajectories)
+
+def generate_dag_tasks(num_tasks=100, max_nodes=25):
+    """Generate synthetic DAG tasks"""
+    
+    tasks = []
+    
+    for task_id in range(num_tasks):
+        # Random DAG parameters
+        num_nodes = np.random.randint(5, max_nodes + 1)
+        max_out_degree = np.random.randint(2, 5)
+        
+        # Create DAG
+        G = nx.DiGraph()
+        
+        # Add nodes with computational requirements
+        for i in range(num_nodes):
+            G.add_node(i, 
+                      computation=np.random.randint(10**7, 10**8),
+                      data_size=np.random.randint(50, 500))
+        
+        # Add edges with dependencies
+        for i in range(1, num_nodes):
+            # Random number of parents
+            num_parents = np.random.randint(1, min(max_out_degree, i) + 1)
+            parents = np.random.choice(range(i), num_parents, replace=False)
+            
+            for parent in parents:
+                G.add_edge(parent, i)
+        
+        # Convert to serializable format
+        nodes_data = {node: G.nodes[node] for node in G.nodes()}
+        edges_data = list(G.edges())
+        
+        tasks.append({
+            'task_id': task_id,
+            'num_nodes': num_nodes,
+            'nodes': nodes_data,
+            'edges': edges_data
+        })
+    
+    return tasks
+
+# Generate datasets
+print("Generating vehicle trajectory data...")
+trajectory_df = generate_vehicle_trajectories(num_vehicles=50, hours=6)
+trajectory_df.to_csv('vehicle_trajectories.csv', index=False)
+print(f"Generated {len(trajectory_df)} trajectory points")
+
+print("Generating DAG tasks...")
+dag_tasks = generate_dag_tasks(num_tasks=200)
+import json
+with open('dag_tasks.json', 'w') as f:
+    json.dump(dag_tasks, f, indent=2)
+print(f"Generated {len(dag_tasks)} DAG tasks")
+
+print("Datasets saved: vehicle_trajectories.csv, dag_tasks.json")
