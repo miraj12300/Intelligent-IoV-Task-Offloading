@@ -1,97 +1,166 @@
-import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
-
-def generate_vehicle_trajectories(num_vehicles=10, hours=24, area_size=3000):
-    """Generate synthetic vehicle trajectory data"""
+def train_trajectory_predictor(processor, file_path):
+    """Train the Transformer trajectory predictor"""
+    print("Training Transformer trajectory predictor...")
     
-    trajectories = []
-    base_time = datetime(2024, 1, 1, 0, 0, 0)
+    # Process data
+    df = processor.load_and_process_data(file_path)
+    sequences, targets = processor.create_sequences(df)
     
-    for veh_id in range(num_vehicles):
-        # Start from random position
-        x = np.random.uniform(0, area_size)
-        y = np.random.uniform(0, area_size)
-        
-        for hour in range(hours):
-            for minute in range(0, 60, 5):  # Every 5 minutes
-                current_time = base_time + timedelta(hours=hour, minutes=minute)
-                
-                # Simulate vehicle movement (random walk)
-                x += np.random.normal(0, 50)  # 50m std deviation
-                y += np.random.normal(0, 50)
-                
-                # Keep within bounds
-                x = np.clip(x, 0, area_size)
-                y = np.clip(y, 0, area_size)
-                
-                # Add some traffic patterns
-                speed = np.random.uniform(5, 25)  # km/h
-                direction = np.random.uniform(0, 2 * np.pi)
-                
-                trajectories.append({
-                    'vehicle_id': veh_id,
-                    'timestamp': current_time,
-                    'x_coordinate': x,
-                    'y_coordinate': y,
-                    'speed': speed,
-                    'direction': direction
-                })
+    # Create dataset and dataloader
+    dataset = TrajectoryDataset(sequences, targets)
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
     
-    return pd.DataFrame(trajectories)
-
-def generate_dag_tasks(num_tasks=100, max_nodes=25):
-    """Generate synthetic DAG tasks"""
+    # Initialize model
+    trajectory_predictor = TransformerTrajectoryPredictor(
+        input_dim=10, d_model=512, nhead=8, num_layers=6
+    )
+    optimizer = optim.Adam(trajectory_predictor.parameters(), lr=1e-5)
+    criterion = nn.MSELoss()
     
-    tasks = []
-    
-    for task_id in range(num_tasks):
-        # Random DAG parameters
-        num_nodes = np.random.randint(5, max_nodes + 1)
-        max_out_degree = np.random.randint(2, 5)
-        
-        # Create DAG
-        G = nx.DiGraph()
-        
-        # Add nodes with computational requirements
-        for i in range(num_nodes):
-            G.add_node(i, 
-                      computation=np.random.randint(10**7, 10**8),
-                      data_size=np.random.randint(50, 500))
-        
-        # Add edges with dependencies
-        for i in range(1, num_nodes):
-            # Random number of parents
-            num_parents = np.random.randint(1, min(max_out_degree, i) + 1)
-            parents = np.random.choice(range(i), num_parents, replace=False)
+    # Training loop
+    trajectory_predictor.train()
+    for epoch in range(10):  # Reduced for demo
+        total_loss = 0
+        for batch_sequences, batch_targets in dataloader:
+            # Reshape for Transformer: (seq_len, batch_size, features)
+            batch_sequences = batch_sequences.transpose(0, 1)
             
-            for parent in parents:
-                G.add_edge(parent, i)
+            optimizer.zero_grad()
+            predictions = trajectory_predictor(batch_sequences)
+            loss = criterion(predictions, batch_targets.transpose(0, 1))
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
         
-        # Convert to serializable format
-        nodes_data = {node: G.nodes[node] for node in G.nodes()}
-        edges_data = list(G.edges())
-        
-        tasks.append({
-            'task_id': task_id,
-            'num_nodes': num_nodes,
-            'nodes': nodes_data,
-            'edges': edges_data
-        })
+        if epoch % 2 == 0:
+            print(f"Trajectory Epoch {epoch}, Loss: {total_loss/len(dataloader):.4f}")
     
-    return tasks
+    print("Trajectory predictor training completed!")
+    return trajectory_predictor
 
-# Generate datasets
-print("Generating vehicle trajectory data...")
-trajectory_df = generate_vehicle_trajectories(num_vehicles=50, hours=6)
-trajectory_df.to_csv('vehicle_trajectories.csv', index=False)
-print(f"Generated {len(trajectory_df)} trajectory points")
+def train_dvtp_with_data(trajectory_file_path):
+    """Main training function with integrated data processing"""
+    
+    # Initialize data processor
+    processor = VehicleTrajectoryProcessor()
+    
+    # Train trajectory predictor
+    trajectory_predictor = train_trajectory_predictor(processor, trajectory_file_path)
+    
+    # Environment parameters
+    num_vehicles = 3
+    num_servers = 2
+    max_nodes = 20
+    state_dim = num_vehicles * max_nodes * 6 + num_vehicles * 2  # Updated state dimension
+    
+    # Initialize environment with trajectory predictor
+    env = DAGEnvironment(num_vehicles, num_servers, max_nodes, trajectory_predictor)
+    agent = PPO(state_dim, max_nodes, num_vehicles + num_servers)
+    
+    # Training parameters
+    num_episodes = 1000
+    max_steps = 100
+    batch_size = 64
+    
+    # Training metrics
+    episode_rewards = []
+    moving_avg_rewards = []
+    
+    print("Starting DVTP training...")
+    
+    for episode in range(num_episodes):
+        state = env.reset()
+        episode_reward = 0
+        states, actions, log_probs, rewards, values = [], [], [], [], []
+        
+        for step in range(max_steps):
+            # Get action from policy
+            action, log_prob, value = agent.get_action(state)
+            
+            # Execute action
+            next_state, reward, done = env.step(action[0], action[1])
+            
+            # Store transition
+            states.append(state)
+            actions.append(action)
+            log_probs.append(log_prob)
+            rewards.append(reward)
+            values.append(value)
+            
+            state = next_state
+            episode_reward += reward
+            
+            if done:
+                break
+        
+        # Calculate returns and advantages
+        returns = []
+        R = 0
+        for r in reversed(rewards):
+            R = r + agent.gamma * R
+            returns.insert(0, R)
+        
+        returns = torch.FloatTensor(returns)
+        values = torch.FloatTensor(values)
+        advantages = returns - values
+        
+        # Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        # Update policy
+        if len(states) >= batch_size:
+            loss = agent.update(states, actions, log_probs, returns, advantages)
+        
+        episode_rewards.append(episode_reward)
+        
+        # Calculate moving average
+        if len(episode_rewards) >= 10:
+            moving_avg = np.mean(episode_rewards[-10:])
+            moving_avg_rewards.append(moving_avg)
+        
+        if episode % 100 == 0:
+            avg_reward = np.mean(episode_rewards[-100:]) if episode >= 100 else np.mean(episode_rewards)
+            print(f"Episode {episode}, Reward: {episode_reward:.2f}, Avg Reward: {avg_reward:.2f}")
+    
+    print("DVTP training completed!")
+    
+    # Plot training progress
+    plt.figure(figsize=(12, 4))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(episode_rewards)
+    plt.title('Episode Rewards')
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(moving_avg_rewards)
+    plt.title('Moving Average (10 episodes)')
+    plt.xlabel('Episode')
+    plt.ylabel('Average Reward')
+    
+    plt.tight_layout()
+    plt.savefig('training_progress.png')
+    plt.show()
+    
+    return agent, trajectory_predictor
 
-print("Generating DAG tasks...")
-dag_tasks = generate_dag_tasks(num_tasks=200)
-import json
-with open('dag_tasks.json', 'w') as f:
-    json.dump(dag_tasks, f, indent=2)
-print(f"Generated {len(dag_tasks)} DAG tasks")
-
-print("Datasets saved: vehicle_trajectories.csv, dag_tasks.json")
+# Run the complete training pipeline
+if __name__ == "__main__":
+    trajectory_file_path = "vehicle_trajectories.csv"
+    
+    try:
+        agent, trajectory_predictor = train_dvtp_with_data(trajectory_file_path)
+        print("Training completed successfully!")
+        
+        # Save trained models
+        torch.save(agent.policy_net.state_dict(), 'dvtp_policy_net.pth')
+        torch.save(trajectory_predictor.state_dict(), 'trajectory_predictor.pth')
+        print("Models saved successfully!")
+        
+    except FileNotFoundError:
+        print(f"Error: File {trajectory_file_path} not found.")
+        print("Please make sure the vehicle_trajectories.csv file exists in the current directory.")
+    except Exception as e:
+        print(f"Error during training: {e}")
